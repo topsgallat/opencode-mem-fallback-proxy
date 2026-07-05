@@ -1,28 +1,90 @@
 const http = require('http');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const pkg = require('../package.json');
 
-// Prevent double-initialization (OpenCode calls plugin for warmup)
 const WARMED_UP = Symbol.for('opencode-mem-fallback-proxy.warmedup');
 
-const defaults = {
-  port: parseInt(process.env.FALLBACK_PROXY_PORT || '3000', 10),
-  primaryUrl: process.env.PRIMARY_URL || 'http://172.17.0.1:2099/v1/chat/completions',
-  fallbackUrl: process.env.FALLBACK_URL || 'https://opencode.ai/zen/go/v1/chat/completions',
-  primaryKey: process.env.MANIFEST_API_KEY,
-  fallbackKey: process.env.OPENCODE_GO_API_KEY,
-  primaryTimeout: parseInt(process.env.PRIMARY_TIMEOUT || '20000', 10),
-  fallbackTimeout: parseInt(process.env.FALLBACK_TIMEOUT || '30000', 10),
-};
-
-function mapModel(model, backend) {
-  if (model !== 'auto') return model;
-  return backend === 'fallback' ? 'deepseek-v4-flash' : 'deepseek-ai/deepseek-v4-pro';
+function parseJSONC(text) {
+  let s = text.replace(/\/\/.*$/gm, '');
+  s = s.replace(/\/\*[\s\S]*?\*\//g, '');
+  s = s.replace(/,(\s*[}\]])/g, '$1');
+  return JSON.parse(s);
 }
 
-function nodeFetch(url, key, body, timeoutMs, model) {
-  const bodyStr = JSON.stringify({ ...body, model });
+function loadConfig() {
+  const configPaths = [
+    process.env.FALLBACK_PROXY_CONFIG,
+    path.join(os.homedir(), '.config', 'opencode', 'opencode-mem-fallback.jsonc'),
+    path.join(os.homedir(), '.config', 'opencode', 'opencode-mem-fallback.json'),
+  ].filter(Boolean);
+
+  for (const configPath of configPaths) {
+    try {
+      const text = fs.readFileSync(configPath, 'utf-8');
+      const parsed = parseJSONC(text);
+
+      if (!Array.isArray(parsed.backends) || parsed.backends.length === 0) {
+        throw new Error('No backends defined in config');
+      }
+      for (let i = 0; i < parsed.backends.length; i++) {
+        const b = parsed.backends[i];
+        if (!b.url || !b.apiKey) {
+          throw new Error(`Backend #${i + 1} ("${b.name || 'unnamed'}") missing url or apiKey`);
+        }
+      }
+
+      console.log(`[mem-fallback-proxy] loaded config: ${configPath}`);
+      return {
+        port: parsed.port || 3000,
+        host: parsed.host || '127.0.0.1',
+        backends: parsed.backends,
+      };
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        console.warn(`[mem-fallback-proxy] config error (${configPath}): ${err.message}`);
+      }
+    }
+  }
+
+  const backends = [];
+
+  const primaryUrl = process.env.PRIMARY_URL;
+  const primaryKey = process.env.PRIMARY_API_KEY || process.env.MANIFEST_API_KEY;
+  if (primaryUrl && primaryKey) {
+    backends.push({
+      name: process.env.PRIMARY_NAME || 'Primary',
+      url: primaryUrl,
+      apiKey: primaryKey,
+      timeout: parseInt(process.env.PRIMARY_TIMEOUT || '20000', 10),
+      model: process.env.PRIMARY_MODEL || undefined,
+    });
+  }
+
+  const fallbackUrl = process.env.FALLBACK_URL;
+  const fallbackKey = process.env.FALLBACK_API_KEY || process.env.OPENCODE_GO_API_KEY;
+  if (fallbackUrl && fallbackKey) {
+    backends.push({
+      name: process.env.FALLBACK_NAME || 'Fallback',
+      url: fallbackUrl,
+      apiKey: fallbackKey,
+      timeout: parseInt(process.env.FALLBACK_TIMEOUT || '30000', 10),
+      model: process.env.FALLBACK_MODEL || undefined,
+    });
+  }
+
+  return {
+    port: parseInt(process.env.PORT || '3000', 10),
+    host: process.env.HOST || '127.0.0.1',
+    backends,
+  };
+}
+
+function nodeFetch(url, key, body, timeoutMs) {
+  const bodyStr = JSON.stringify(body);
   const parsed = new URL(url);
   const mod = parsed.protocol === 'https:' ? https : http;
 
@@ -50,18 +112,16 @@ function nodeFetch(url, key, body, timeoutMs, model) {
   });
 }
 
-async function tryBackend(url, key, body, timeoutMs, backendName) {
-  const mappedModel = mapModel(body.model, backendName);
-  const response = await nodeFetch(url, key, body, timeoutMs, mappedModel);
+async function tryBackend(backend, body) {
+  const requestBody = backend.model ? { ...body, model: backend.model } : body;
+  const response = await nodeFetch(backend.url, backend.apiKey, requestBody, backend.timeout || 30000);
   if (response.statusCode >= 400) {
-    throw new Error(`${backendName} HTTP ${response.statusCode}: ${(response.body || '').slice(0, 200)}`);
+    throw new Error(`${backend.name} HTTP ${response.statusCode}: ${(response.body || '').slice(0, 200)}`);
   }
   return response;
 }
 
 function createServer(cfg) {
-  const { primaryUrl, primaryKey, primaryTimeout, fallbackUrl, fallbackKey, fallbackTimeout } = cfg;
-
   return http.createServer(async (req, res) => {
     const parsed = new URL(req.url, `http://${req.headers.host}`);
     if (req.method !== 'POST' || parsed.pathname !== '/v1/chat/completions') {
@@ -70,9 +130,9 @@ function createServer(cfg) {
       return;
     }
 
-    if (!primaryKey || !fallbackKey) {
+    if (!cfg.backends.length) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'MANIFEST_API_KEY and OPENCODE_GO_API_KEY must be set' }));
+      res.end(JSON.stringify({ error: 'No backends configured' }));
       return;
     }
 
@@ -88,53 +148,50 @@ function createServer(cfg) {
     }
 
     const now = new Date().toISOString();
-    let lastError;
+    const errors = [];
 
-    try {
-      const response = await tryBackend(primaryUrl, primaryKey, body, primaryTimeout, 'primary');
-      console.log(`[mem-fallback-proxy] ${now} Primary (Manifest) OK`);
-      res.writeHead(response.statusCode, { 'Content-Type': 'application/json' });
-      res.end(response.body);
-      return;
-    } catch (err) {
-      console.warn(`[mem-fallback-proxy] ${now} Primary failed: ${err.message}`);
-      lastError = err;
+    for (const backend of cfg.backends) {
+      try {
+        const response = await tryBackend(backend, body);
+        console.log(`[mem-fallback-proxy] ${now} ${backend.name} OK`);
+        res.writeHead(response.statusCode, { 'Content-Type': 'application/json' });
+        res.end(response.body);
+        return;
+      } catch (err) {
+        console.warn(`[mem-fallback-proxy] ${now} ${backend.name} failed: ${err.message}`);
+        errors.push({ name: backend.name, error: err.message });
+      }
     }
 
-    try {
-      const response = await tryBackend(fallbackUrl, fallbackKey, body, fallbackTimeout, 'fallback');
-      console.log(`[mem-fallback-proxy] ${now} Fallback (OpenCode Go) OK`);
-      res.writeHead(response.statusCode, { 'Content-Type': 'application/json' });
-      res.end(response.body);
-    } catch (err) {
-      console.error(`[mem-fallback-proxy] ${now} Fallback failed: ${err.message}`);
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        error: 'Both backends failed',
-        primaryError: lastError.message,
-        fallbackError: err.message,
-      }));
-    }
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'All backends failed', backendErrors: errors }));
   });
 }
 
 let server = null;
 
 async function plugin(ctx, opts) {
-  if (globalThis[WARMED_UP]) {
-    return {};
-  }
+  if (globalThis[WARMED_UP]) return {};
   globalThis[WARMED_UP] = true;
 
-  const cfg = { ...defaults, ...(opts || {}) };
+  try {
+    const cfg = loadConfig();
 
-  if (cfg.primaryKey && cfg.fallbackKey) {
+    if (!cfg.backends.length) {
+      console.warn('[mem-fallback-proxy] No backends configured; proxy not started. Create ~/.config/opencode/opencode-mem-fallback.jsonc');
+      return {};
+    }
+
     server = createServer(cfg);
-    server.listen(cfg.port, '127.0.0.1', () => {
-      console.log(`[mem-fallback-proxy] proxy listening on http://127.0.0.1:${cfg.port}/v1/chat/completions`);
+    server.listen(cfg.port, cfg.host, () => {
+      console.log(`[mem-fallback-proxy] listening on http://${cfg.host}:${cfg.port}/v1/chat/completions`);
+      console.log(`[mem-fallback-proxy] ${cfg.backends.length} backend(s):`);
+      for (const b of cfg.backends) {
+        console.log(`[mem-fallback-proxy]   ${b.name} -> ${b.url}${b.model ? ` (model: ${b.model})` : ''}`);
+      }
     });
-  } else {
-    console.warn('[mem-fallback-proxy] API keys not configured; proxy not started (set MANIFEST_API_KEY and OPENCODE_GO_API_KEY)');
+  } catch (err) {
+    console.error(`[mem-fallback-proxy] failed to start: ${err.message}`);
   }
 
   return {
@@ -142,7 +199,7 @@ async function plugin(ctx, opts) {
       if (server) {
         server.close();
         server = null;
-        console.log('[mem-fallback-proxy] proxy stopped');
+        console.log('[mem-fallback-proxy] stopped');
       }
     },
   };
