@@ -1,0 +1,39 @@
+{
+  // opencode-mem-fallback-proxy configuration
+  //
+  // Place this file at ~/.config/opencode/opencode-mem-fallback.jsonc
+  // or set FALLBACK_PROXY_CONFIG env to a custom path.
+  //
+  // Backends are tried in order: if one fails, the next is attempted.
+  // Each backend has:
+  //   name    - display name (for logs)
+  //   url     - chat completion endpoint (must accept POST /v1/chat/completions)
+  //   apiKey  - bearer token
+  //   timeout - request timeout in ms (default: 30000)
+  //   model   - if set, overrides the model field in the incoming request
+
+  "port": 3000,
+  "host": "127.0.0.1",
+
+  "backends": [
+    {
+      "name": "Primary API",
+      "url": "https://api.example.com/v1/chat/completions",
+      "apiKey": "sk-your-key-here",
+      "timeout": 20000
+    },
+    {
+      "name": "Fallback API",
+      "url": "https://fallback.example.com/v1/chat/completions",
+      "apiKey": "sk-your-fallback-key-here",
+      "timeout": 30000,
+      "model": "gpt-4o-mini"
+    },
+    {
+      "name": "Last Resort",
+      "url": "http://localhost:8080/v1/chat/completions",
+      "apiKey": "local-dev-key",
+      "timeout": 10000
+    }
+  ]
+}
