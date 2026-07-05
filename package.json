@@ -1,0 +1,21 @@
+{
+  "name": "opencode-mem-fallback-proxy",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that auto-starts a local HTTP proxy for opencode-mem with automatic fallback between Manifest API and OpenCode Go",
+  "main": "dist/plugin.js",
+  "files": [
+    "dist/"
+  ],
+  "opencode": {
+    "type": "plugin"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-mem",
+    "memory",
+    "proxy",
+    "fallback"
+  ],
+  "license": "MIT"
+}
