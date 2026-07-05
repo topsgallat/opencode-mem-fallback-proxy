@@ -46,9 +46,7 @@ Replace `/path/to/opencode-mem-fallback-proxy` with the path you used in the `fi
 
 ### 3. Restart OpenCode
 
-```bash
-s6-svc -r /run/service/opencode/
-```
+Restart the OpenCode service however it is managed on your system (s6, systemd, launchd, etc.).
 
 Check that the proxy started:
 
@@ -175,7 +173,7 @@ Config file at `~/.config/opencode/opencode-mem-fallback.jsonc`:
 **Proxy doesn't start:**
 - Check `opencode.json` has the plugin listed.
 - Verify the `file:` path points to the directory with `package.json` and `dist/plugin.js`.
-- Run `s6-svstat /run/service/opencode/` to confirm OpenCode is running.
+- Check your OpenCode service status (e.g. `s6-svstat /run/service/opencode/` if using s6).
 
 **All backends fail with "Request timed out":**
 - Test each backend URL directly with curl.
