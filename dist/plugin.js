@@ -9,10 +9,40 @@ const pkg = require('../package.json');
 const WARMED_UP = Symbol.for('opencode-mem-fallback-proxy.warmedup');
 
 function parseJSONC(text) {
-  let s = text.replace(/\/\/.*$/gm, '');
-  s = s.replace(/\/\*[\s\S]*?\*\//g, '');
-  s = s.replace(/,(\s*[}\]])/g, '$1');
-  return JSON.parse(s);
+  let out = '';
+  let inString = false, inComment = false, inBlock = false;
+  let quote = null;
+
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const n = text[i + 1];
+
+    if (inBlock) {
+      if (c === '*' && n === '/') { inBlock = false; i++; }
+      continue;
+    }
+
+    if (inComment) {
+      if (c === '\n') { inComment = false; out += c; }
+      continue;
+    }
+
+    if (inString) {
+      out += c;
+      if (c === '\\') { out += n; i++; continue; }
+      if (c === quote) inString = false;
+      continue;
+    }
+
+    if (c === '/' && n === '/') { inComment = true; i++; continue; }
+    if (c === '/' && n === '*') { inBlock = true; i++; continue; }
+    if (c === '"' || c === "'") { inString = true; quote = c; }
+
+    out += c;
+  }
+
+  out = out.replace(/,(\s*[}\]])/g, '$1');
+  return JSON.parse(out);
 }
 
 function loadConfig() {
