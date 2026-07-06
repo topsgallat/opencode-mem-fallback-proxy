@@ -18,45 +18,120 @@ opencode-mem → localhost:3000 → Primary API (e.g. Manifest)
                                 → Additional backends...
 ```
 
-## Installation
+## Quick start (for AI agents)
 
-### 1. Add the plugin to `opencode.json`
+An AI agent can install this plugin by executing the steps below in order. Each step includes a verification check — do not proceed to the next step if verification fails.
 
-Because this plugin is not published on npm, use a `file:` reference pointing to your local clone:
+### Step 1 — Resolve target directory
 
-```json
+Choose a directory on the local filesystem. Standard location:
+
+```bash
+TARGET_DIR="$HOME/.config/opencode/node_modules/opencode-mem-fallback-proxy"
+```
+
+### Step 2 — Clone the repo
+
+```bash
+git clone https://github.com/topsgallat/opencode-mem-fallback-proxy.git "$TARGET_DIR"
+```
+
+**Verify**: `ls "$TARGET_DIR/package.json"` exists.
+
+### Step 3 — Add plugin to `opencode.json`
+
+Read the file:
+
+```bash
+cat "$HOME/.config/opencode/opencode.json"
+```
+
+Locate the `"plugin"` array. Insert `"file:$TARGET_DIR"` **before** `"opencode-mem"` (or at the end if `opencode-mem` is not present). Example edit (adapt as needed):
+
+```bash
+CONFIG="$HOME/.config/opencode/opencode.json"
+# Insert the plugin entry before "opencode-mem" if it exists
+if grep -q '"opencode-mem"' "$CONFIG"; then
+  sed -i '0,/"opencode-mem"/s//"file:'"$TARGET_DIR"'",\n    "opencode-mem"/' "$CONFIG"
+else
+  # No opencode-mem found — add at end of plugin array (requires manual edit)
+  echo "WARNING: opencode-mem not found in plugin list. Add \"file:$TARGET_DIR\" manually."
+fi
+```
+
+> **Important**: If your config has other plugins before `opencode-mem`, adjust the insertion point. The fallback proxy must load **before** `opencode-mem`.
+
+**Verify**: `grep -c 'opencode-mem-fallback-proxy' "$CONFIG"` returns `1`.
+
+### Step 4 — Create config file
+
+Write config to `~/.config/opencode/opencode-mem-fallback.jsonc`:
+
+```bash
+CONFIG_FILE="$HOME/.config/opencode/opencode-mem-fallback.jsonc"
+cat > "$CONFIG_FILE" << 'CONFIGEOF'
 {
-  "plugin": [
-    // ... other plugins ...
-    "file:/home/your-user/path/to/opencode-mem-fallback-proxy",
-    "opencode-mem"
+  "port": 3000,
+  "host": "127.0.0.1",
+  "backends": [
+    {
+      "name": "Primary",
+      "url": "https://primary.example.com/v1/chat/completions",
+      "apiKey": "sk-primary-key",
+      "timeout": 20000
+    },
+    {
+      "name": "Fallback",
+      "url": "https://fallback.example.com/v1/chat/completions",
+      "apiKey": "sk-fallback-key",
+      "timeout": 30000,
+      "model": "gpt-4o-mini"
+    }
   ]
 }
+CONFIGEOF
 ```
 
-> `opencode-mem-fallback-proxy` should appear **before** `opencode-mem` in the list so it is loaded first.
+Replace the `url` and `apiKey` values with the actual backend endpoints. See the [Configuration](#configuration) section for all fields.
 
-### 2. Clone the repo
+**Verify**: `node -e "JSON.parse(require('fs').readFileSync('$CONFIG_FILE','utf8').replace(/\/\/.*$/gm,''))"` exits with code 0.
+
+### Step 5 — Point opencode-mem to the proxy
+
+If you use `opencode-mem`, update its config (`opencode-mem.jsonc`) to route through the proxy:
 
 ```bash
-git clone https://github.com/topsgallat/opencode-mem-fallback-proxy.git /path/to/opencode-mem-fallback-proxy
+MEM_CONFIG="$HOME/.config/opencode/opencode-mem.jsonc"
+# If file exists, update memoryApiUrl (using sed as example — adjust as needed)
+if [ -f "$MEM_CONFIG" ]; then
+  sed -i 's|"memoryApiUrl": "[^"]*"|"memoryApiUrl": "http://127.0.0.1:3000/v1"|' "$MEM_CONFIG"
+  sed -i 's|"memoryApiKey": "[^"]*"|"memoryApiKey": "unused"|' "$MEM_CONFIG"
+fi
 ```
 
-Replace `/path/to/opencode-mem-fallback-proxy` with the path you used in the `file:` reference above.
-
-### 3. Restart OpenCode
-
-Restart the OpenCode service however it is managed on your system (s6, systemd, launchd, etc.).
-
-Check that the proxy started:
+### Step 6 — Restart OpenCode
 
 ```bash
+# s6 (Linux):
+/package/admin/s6/command/s6-svc -r /run/service/opencode/
+
+# systemd:
+# systemctl restart opencode
+
+# launchd (macOS):
+# launchctl kickstart -k gui/$(id -u)/com.opencode.service
+```
+
+### Step 7 — Verify the proxy
+
+```bash
+sleep 3
 curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/v1/chat/completions \
   -X POST -H "Content-Type: application/json" \
   -d '{"model":"auto","messages":[{"role":"user","content":"ping"}]}'
 ```
 
-Expect `200`.
+**Verify**: Output is `200`. If not, check OpenCode logs and confirm the config file is valid JSONC.
 
 ## Configuration
 
